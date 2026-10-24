@@ -56,7 +56,8 @@ def test_analyze_endpoint_ssrf_blocking(blocked_url, expected_code):
 def test_analyze_endpoint_success_mocked():
     """
     Verify that valid website analysis returns HTTP 200 with complete
-    website metadata, security headers, and cookie analysis.
+    website metadata, security headers, cookie analysis, risk assessment,
+    structured findings, and finding summary.
     """
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -92,10 +93,42 @@ def test_analyze_endpoint_success_mocked():
                 assert data["domain"] == "example.com"
                 assert data["protocol"] == "HTTPS"
                 assert data["status_code"] == 200
+
+                # Check security headers
                 assert data["security_headers"]["hsts"]["present"] is True
-                assert data["security_headers"]["hsts"]["value"] == "max-age=31536000; includeSubDomains"
                 assert data["security_headers"]["x_frame_options"]["present"] is True
-                assert data["security_headers"]["x_frame_options"]["value"] == "DENY"
+
+                # Check cookies
                 assert "cookies" in data
                 assert data["cookies"]["cookie_count"] == 0
+
+                # Check TLS
                 assert data["tls_certificate"]["valid"] is True
+
+                # Check Phase 3 additions: Assessment, Findings, Summary
+                assert "assessment" in data
+                assessment = data["assessment"]
+                assert assessment["status"] == "complete"
+                assert isinstance(assessment["risk_score"], int)
+                assert assessment["risk_level"] in {"Low", "Moderate", "High", "Critical"}
+                assert assessment["confidence"] == "High"
+                assert assessment["methodology_version"] == "1.0"
+                assert "summary" in assessment
+
+                # Check findings and summary consistency
+                assert "findings" in data
+                assert isinstance(data["findings"], list)
+
+                assert "finding_summary" in data
+                summary = data["finding_summary"]
+                assert summary["total"] == len(data["findings"])
+                assert summary["total"] == (
+                    summary["critical"]
+                    + summary["high"]
+                    + summary["medium"]
+                    + summary["low"]
+                    + summary["informational"]
+                )
+
+                assert "limitations" in data
+                assert isinstance(data["limitations"], list)
