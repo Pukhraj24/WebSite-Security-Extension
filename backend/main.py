@@ -4,12 +4,14 @@ from pydantic import BaseModel, Field
 
 from website_analyzer import analyze_website
 from cookie_analyzer import analyze_cookies
+from security_findings import generate_security_findings
+from risk_scorer import calculate_risk, calculate_finding_summary
 
 
 app = FastAPI(
     title="Website Security API",
-    description="Website security, cookie configuration, and TLS analyzer with SSRF protection",
-    version="1.1.0"
+    description="Website security, cookie configuration, TLS analyzer, and risk scoring engine",
+    version="1.2.0"
 )
 
 
@@ -20,7 +22,7 @@ class WebsiteRequest(BaseModel):
 @app.exception_handler(Exception)
 def global_exception_handler(request: Request, exc: Exception):
     """
-    Catch any unhandled exceptions to prevent stack trace leaks to API clients.
+    Catch unhandled exceptions to prevent stack trace leaks to API clients.
     """
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -52,15 +54,14 @@ def health():
 def analyze_website_endpoint(website: WebsiteRequest):
     url = str(website.url).strip()
 
-    # Perform website and security header/TLS analysis
+    # Perform website connectivity, redirect, TLS, and header analysis
     website_data = analyze_website(url)
 
-    # If the website was not reachable or was blocked by security policy:
+    # Handle connection errors or security blocks
     if not website_data.get("reachable", False):
         error_info = website_data.get("error", {})
         error_code = error_info.get("code", "UNKNOWN_ERROR")
 
-        # Map security and reachability error codes to standard HTTP statuses
         if error_code in {
             "SSRF_BLOCKED",
             "INVALID_URL",
@@ -81,7 +82,7 @@ def analyze_website_endpoint(website: WebsiteRequest):
 
         return JSONResponse(status_code=http_status, content=website_data)
 
-    # Retrieve response object for cookie analysis
+    # Perform cookie analysis on the HTTP response
     response = website_data.pop("response", None)
     cookie_data = {
         "cookie_count": 0,
@@ -97,11 +98,26 @@ def analyze_website_endpoint(website: WebsiteRequest):
         try:
             cookie_data = analyze_cookies(response)
         finally:
-            # Guarantee HTTP connection is closed on all code paths
+            # Guarantee HTTP connection is closed on all execution paths
             response.close()
 
-    # Combine website metadata and cookie analysis
+    # Generate structured security findings and assessment limitations
+    findings, limitations = generate_security_findings(website_data, cookie_data)
+
+    # Calculate risk score and summary metrics
+    assessment_context = {
+        "reachable": True,
+        "limitations": limitations
+    }
+    assessment = calculate_risk(findings, assessment_context)
+    finding_summary = calculate_finding_summary(findings)
+
+    # Return unified, machine-readable analysis response
     return {
         **website_data,
-        "cookies": cookie_data
+        "cookies": cookie_data,
+        "assessment": assessment,
+        "findings": findings,
+        "finding_summary": finding_summary,
+        "limitations": limitations
     }
