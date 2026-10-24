@@ -2,11 +2,20 @@ from urllib.parse import urlparse
 import requests
 import ssl
 import socket
-
+import os
+import tempfile
 from datetime import datetime, timezone
+from typing import Dict, Any, Optional
+
+from ssrf_validator import (
+    safe_fetch,
+    create_safe_socket,
+    SSRFSecurityError,
+    validate_url
+)
 
 
-# Security headers that we want to inspect
+# Security headers to inspect on the target website
 SECURITY_HEADERS = {
     "hsts": "Strict-Transport-Security",
     "csp": "Content-Security-Policy",
@@ -20,348 +29,297 @@ SECURITY_HEADERS = {
 }
 
 
-def parse_certificate_time(value):
+def parse_certificate_time(value: Optional[str]) -> Optional[datetime]:
     """
-    Convert certificate date into a timezone-aware datetime.
+    Convert certificate date string into a timezone-aware UTC datetime.
     """
-
     if not value:
         return None
 
-    return datetime.strptime(
-        value,
-        "%b %d %H:%M:%S %Y %Z"
-    ).replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(
+            value,
+            "%b %d %H:%M:%S %Y %Z"
+        ).replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 
-def parse_certificate_part(part):
+def parse_certificate_part(part) -> Dict[str, str]:
     """
-    Convert certificate subject/issuer information
-    into a simple dictionary.
+    Convert certificate subject/issuer RDN tuples into a clean dictionary.
     """
-
     result = {}
+    if not part:
+        return result
 
     for rdn in part:
-
         for key, value in rdn:
             result[key] = value
 
     return result
 
 
-def get_certificate_info(hostname, port):
+def decode_der_certificate(der_bytes: bytes) -> Dict[str, Any]:
     """
-    Inspect the TLS certificate of a website.
+    Safely decode binary DER certificate data into a dictionary structure
+    without needing external heavyweight dependencies.
     """
+    if not der_bytes:
+        return {}
 
     try:
+        pem = ssl.DER_cert_to_PEM_cert(der_bytes)
+        fd, path = tempfile.mkstemp(suffix=".pem")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(pem)
 
-        # Normal certificate verification
+            if hasattr(ssl, "_ssl") and hasattr(ssl._ssl, "_test_decode_cert"):
+                return ssl._ssl._test_decode_cert(path)
+        finally:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    return {}
+
+
+def get_certificate_info(hostname: str, port: int) -> Dict[str, Any]:
+    """
+    Inspect the TLS certificate of a website using SSRF-safe connections.
+    
+    Adheres to strict security rules:
+    - Never opens an unvalidated socket (SSRF protection enforced).
+    - Never treats an untrusted certificate as valid.
+    - Decodes diagnostic details for untrusted certs without bypassing trust rules.
+    """
+    try:
+        # 1. Establish an SSRF-safe socket to the pinned public IP
+        sock, pinned_ip = create_safe_socket(hostname, port, timeout=5.0)
+
+        # 2. Strict certificate verification
         context = ssl.create_default_context()
 
-        with socket.create_connection(
-            (hostname, port),
-            timeout=5
-        ) as sock:
+        with sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as secure_sock:
+                cert = secure_sock.getpeercert()
 
-            with context.wrap_socket(
-                sock,
-                server_hostname=hostname
-            ) as secure_sock:
-
-                certificate = secure_sock.getpeercert()
-
-                not_before = parse_certificate_time(
-                    certificate.get("notBefore")
-                )
-
-                not_after = parse_certificate_time(
-                    certificate.get("notAfter")
-                )
-
+                not_before = parse_certificate_time(cert.get("notBefore"))
+                not_after = parse_certificate_time(cert.get("notAfter"))
                 current_time = datetime.now(timezone.utc)
 
                 valid = False
-
                 days_remaining = None
 
                 if not_before and not_after:
+                    valid = not_before <= current_time <= not_after
+                    days_remaining = (not_after - current_time).days
 
-                    valid = (
-                        not_before
-                        <= current_time
-                        <= not_after
-                    )
-
-                    days_remaining = (
-                        not_after - current_time
-                    ).days
-
-                issuer = parse_certificate_part(
-                    certificate.get("issuer", ())
-                )
-
-                subject = parse_certificate_part(
-                    certificate.get("subject", ())
-                )
+                issuer = parse_certificate_part(cert.get("issuer", ()))
+                subject = parse_certificate_part(cert.get("subject", ()))
 
                 cipher_info = secure_sock.cipher()
-
-                cipher = None
-
-                if cipher_info:
-                    cipher = cipher_info[0]
+                cipher = cipher_info[0] if cipher_info else None
 
                 return {
                     "checked": True,
                     "valid": valid,
+                    "trusted": True,
+                    "verification_error": None,
                     "issuer": issuer,
                     "subject": subject,
-                    "valid_from": (
-                        not_before.isoformat()
-                        if not_before
-                        else None
-                    ),
-                    "expires_at": (
-                        not_after.isoformat()
-                        if not_after
-                        else None
-                    ),
+                    "valid_from": not_before.isoformat() if not_before else None,
+                    "expires_at": not_after.isoformat() if not_after else None,
                     "days_remaining": days_remaining,
                     "tls_version": secure_sock.version(),
                     "cipher": cipher
                 }
 
     except ssl.SSLCertVerificationError as error:
-
-        # The certificate failed normal verification.
-        # We make a second diagnostic connection without
-        # trusting the certificate, only to inspect it.
-
+        # The certificate failed standard trust verification.
+        # Open an SSRF-safe diagnostic connection (NEVER unrestricted) to extract details.
         try:
+            diag_sock, pinned_ip = create_safe_socket(hostname, port, timeout=5.0)
+            diag_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            diag_context.check_hostname = False
+            diag_context.verify_mode = ssl.CERT_NONE
 
-            context = ssl.SSLContext(
-                ssl.PROTOCOL_TLS_CLIENT
-            )
+            with diag_sock:
+                with diag_context.wrap_socket(diag_sock, server_hostname=hostname) as diag_secure_sock:
+                    der = diag_secure_sock.getpeercert(binary_form=True)
+                    decoded = decode_der_certificate(der) if der else {}
 
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
+                    not_before = parse_certificate_time(decoded.get("notBefore"))
+                    not_after = parse_certificate_time(decoded.get("notAfter"))
+                    current_time = datetime.now(timezone.utc)
 
-            with socket.create_connection(
-                (hostname, port),
-                timeout=5
-            ) as sock:
+                    days_remaining = None
+                    if not_before and not_after:
+                        days_remaining = (not_after - current_time).days
 
-                with context.wrap_socket(
-                    sock,
-                    server_hostname=hostname
-                ) as secure_sock:
+                    issuer = parse_certificate_part(decoded.get("issuer", ()))
+                    subject = parse_certificate_part(decoded.get("subject", ()))
 
-                    certificate = secure_sock.getpeercert()
+                    cipher_info = diag_secure_sock.cipher()
+                    cipher = cipher_info[0] if cipher_info else None
 
                     return {
                         "checked": True,
-                        "valid": False,
+                        "valid": False,  # Untrusted certificates are NEVER valid
+                        "trusted": False,
                         "verification_error": str(error),
-                        "issuer": {},
-                        "subject": {},
-                        "valid_from": None,
-                        "expires_at": None,
-                        "days_remaining": None,
-                        "tls_version": secure_sock.version(),
-                        "cipher": (
-                            secure_sock.cipher()[0]
-                            if secure_sock.cipher()
-                            else None
-                        )
+                        "issuer": issuer,
+                        "subject": subject,
+                        "valid_from": not_before.isoformat() if not_before else None,
+                        "expires_at": not_after.isoformat() if not_after else None,
+                        "days_remaining": days_remaining,
+                        "tls_version": diag_secure_sock.version(),
+                        "cipher": cipher
                     }
-
-        except Exception as diagnostic_error:
-
+        except Exception as diag_err:
             return {
                 "checked": True,
                 "valid": False,
+                "trusted": False,
                 "verification_error": str(error),
-                "error": str(diagnostic_error)
+                "error": f"Failed to retrieve diagnostic certificate: {diag_err}"
             }
 
-    except Exception as error:
-
+    except SSRFSecurityError as ssrf_err:
         return {
             "checked": False,
             "valid": False,
-            "error": str(error)
+            "trusted": False,
+            "error": ssrf_err.message
         }
 
-
-def analyze_website(url):
-
-    # Parse URL
-    parsed_url = urlparse(url)
-
-    protocol = parsed_url.scheme.lower()
-
-    hostname = parsed_url.hostname
-
-    domain = parsed_url.netloc
-
-    # Make sure we have a valid web protocol
-    if protocol not in {"http", "https"}:
-
+    except Exception as error:
         return {
-            "url": url,
-            "reachable": False,
-            "error": "Only HTTP and HTTPS URLs are supported."
+            "checked": False,
+            "valid": False,
+            "trusted": False,
+            "error": "Failed to establish TLS connection."
         }
 
-    if not hostname:
 
-        return {
-            "url": url,
-            "reachable": False,
-            "error": "Could not determine website hostname."
-        }
-
-    # Determine port
-    if parsed_url.port:
-        port = parsed_url.port
-
-    elif protocol == "https":
-        port = 443
-
-    else:
-        port = 80
-
-    secure_connection = protocol == "https"
-
-    # Try to connect to the website
-    start_time = datetime.now(timezone.utc)
-
+def analyze_website(url: str) -> Dict[str, Any]:
+    """
+    Analyze website connectivity, redirects, security headers, and TLS certificates
+    with SSRF protection, size caps, and safe error handling.
+    """
+    # Pre-validate URL and extract basic components
     try:
-
-        response = requests.get(
-            url,
-            timeout=10,
-            allow_redirects=True,
-            stream=True,
-            headers={
-                "User-Agent": (
-                    "WebsiteSecurityAnalyzer/1.0"
-                )
+        url_info = validate_url(url)
+    except SSRFSecurityError as err:
+        return {
+            "url": url,
+            "reachable": False,
+            "error": {
+                "code": err.code,
+                "message": err.message
             }
+        }
+
+    hostname = url_info["hostname"]
+    protocol = url_info["scheme"].upper()
+    port = url_info["port"]
+    domain = url_info["netloc"]
+    secure_connection = url_info["scheme"] == "https"
+
+    # Safely fetch the website with full SSRF and size controls
+    try:
+        response, redirect_chain, final_url, response_time_ms = safe_fetch(
+            url,
+            max_redirects=5,
+            total_timeout=10.0,
+            connect_timeout=3.0,
+            read_timeout=5.0,
+            max_bytes=2 * 1024 * 1024  # 2 MB limit
         )
-
-    except requests.exceptions.SSLError as error:
-
-        certificate_info = None
-
+    except SSRFSecurityError as err:
+        return {
+            "url": url,
+            "reachable": False,
+            "error": {
+                "code": err.code,
+                "message": err.message
+            }
+        }
+    except requests.exceptions.SSLError:
+        # TLS handshake or certificate failed during HTTP fetch
+        cert_info = None
         if secure_connection:
-            certificate_info = get_certificate_info(
-                hostname,
-                port
-            )
+            cert_info = get_certificate_info(hostname, port)
 
         return {
             "url": url,
             "reachable": False,
-            "error": "TLS connection could not be established.",
-            "tls_certificate": certificate_info
+            "error": {
+                "code": "TLS_ERROR",
+                "message": "TLS connection could not be established."
+            },
+            "tls_certificate": cert_info
         }
-
-    except requests.exceptions.RequestException as error:
-
+    except requests.exceptions.RequestException:
         return {
             "url": url,
             "reachable": False,
-            "error": "Could not connect to the website.",
-            "details": str(error)
+            "error": {
+                "code": "WEBSITE_UNREACHABLE",
+                "message": "Could not connect to the website."
+            }
+        }
+    except Exception:
+        return {
+            "url": url,
+            "reachable": False,
+            "error": {
+                "code": "CONNECTION_FAILED",
+                "message": "An unexpected error occurred while reaching the website."
+            }
         }
 
-    end_time = datetime.now(timezone.utc)
-
-    response_time_ms = (
-        end_time - start_time
-    ).total_seconds() * 1000
-
-    # HTTP information
+    # Extract HTTP status and response details
     status_code = response.status_code
+    content_type = response.headers.get("Content-Type")
 
-    final_url = str(response.url)
-
-    content_type = response.headers.get(
-        "Content-Type"
-    )
-
-    # Redirect information
-    redirect_chain = []
-
-    for redirect in response.history:
-
-        redirect_chain.append({
-            "status_code": redirect.status_code,
-            "url": str(redirect.url),
-            "location": redirect.headers.get(
-                "Location"
-            )
-        })
-
-    # Security headers
+    # Security headers extraction (both presence and value)
     security_headers = {}
-
     for key, header_name in SECURITY_HEADERS.items():
-
-        value = response.headers.get(
-            header_name
-        )
-
+        value = response.headers.get(header_name)
         security_headers[key] = {
             "present": value is not None,
             "value": value
         }
 
-    # TLS certificate
+    # TLS certificate analysis (only if initial or final scheme is HTTPS)
     certificate_info = None
-
-    if secure_connection:
-
-        certificate_info = get_certificate_info(
-            hostname,
-            port
-        )
+    final_is_https = final_url.lower().startswith("https://")
+    if secure_connection or final_is_https:
+        target_hostname = urlparse(final_url).hostname or hostname
+        target_port = urlparse(final_url).port or 443
+        certificate_info = get_certificate_info(target_hostname, target_port)
 
     return {
         "url": url,
-
         "reachable": True,
-
         "domain": domain,
-
         "hostname": hostname,
-
-        "protocol": protocol.upper(),
-
+        "protocol": protocol,
         "secure_connection": secure_connection,
-
         "status_code": status_code,
-
         "final_url": final_url,
-
-        "redirect_count": len(response.history),
-
+        "redirect_count": len(redirect_chain),
         "redirect_chain": redirect_chain,
-
-        "response_time_ms": round(
-            response_time_ms,
-            2
-        ),
-
+        "response_time_ms": response_time_ms,
         "content_type": content_type,
-
         "tls_certificate": certificate_info,
-
         "security_headers": security_headers,
-
-        # Used internally by cookie_analyzer.py
+        # Response object passed for cookie analysis; must be closed by caller
         "response": response
     }
