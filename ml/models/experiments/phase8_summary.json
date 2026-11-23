@@ -1,0 +1,71 @@
+{
+  "phase": "Phase 8B",
+  "status": "Complete",
+  "evaluation_date": "2026-11-05",
+  "dataset": {
+    "source": "URL-Phish (Mendeley Data v2)",
+    "total_rows": 116600,
+    "unique_domains": 90860,
+    "test_rows": 20044,
+    "test_domains": 13630,
+    "domain_leakage": 0
+  },
+  "v1_baseline_held_out": {
+    "model_name": "HistGradientBoosting",
+    "features": 22,
+    "threshold": 0.8,
+    "accuracy": 0.9569,
+    "precision": 0.95,
+    "recall": 0.8631,
+    "f1": 0.9045,
+    "roc_auc": 0.9901,
+    "pr_auc": 0.9716,
+    "fpr": 0.014,
+    "fnr": 0.1369,
+    "brier_score": 0.0327,
+    "model_size_kb": 400.16,
+    "latency_ms": 4.85
+  },
+  "v2_selected_held_out": {
+    "model_name": "HistGradientBoosting",
+    "features": 40,
+    "tuned_threshold": 0.95,
+    "accuracy": 0.9543,
+    "precision": 0.986,
+    "recall": 0.8181,
+    "f1": 0.8943,
+    "roc_auc": 0.9955,
+    "pr_auc": 0.9868,
+    "fpr": 0.0036,
+    "fnr": 0.1819,
+    "brier_score": 0.0211,
+    "model_size_kb": 525.19,
+    "latency_ms": 6.05,
+    "sensitivity_at_0_80": {
+      "threshold": 0.8,
+      "precision": 0.9555,
+      "recall": 0.9398,
+      "f1": 0.9476,
+      "fpr": 0.0135
+    }
+  },
+  "ablation_key_finding": {
+    "most_impactful_group": "hostname_structure",
+    "val_pr_auc_jump": "0.9727 -> 0.9841 (+0.0114)",
+    "encoding_group_impact": "neutral/slight (0.9727 -> 0.9725)",
+    "credential_group_impact": "modest (0.9727 -> 0.9753)",
+    "full_v2_val_pr_auc": 0.9826
+  },
+  "hybrid_evaluation_status": {
+    "statistically_supported_on_dataset": false,
+    "reason": "Offline URL-Phish dataset lacks live HTTP headers, TLS handshake details, cookies, and HTML DOM. Proxy simulation demonstrates proxy rules alone detect <1% of threats. Real hybrid validation requires a multi-modal dataset collected via active probing.",
+    "architectural_contract_established": true,
+    "deterministic_override_prevented": true
+  },
+  "test_suite": {
+    "ml_tests_passed": 101,
+    "backend_tests_passed": 157,
+    "total_tests_passed": 258,
+    "regressions": 0
+  }
+}

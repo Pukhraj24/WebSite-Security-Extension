@@ -1,0 +1,8 @@
+# Machine Learning dependencies for Website Security Extension (Phase 7)
+numpy>=2.0.0
+scipy>=1.14.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+matplotlib>=3.9.0
+joblib>=1.4.0
+tldextract>=5.0.0

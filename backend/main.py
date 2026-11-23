@@ -1,22 +1,51 @@
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, status, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+from fastapi.middleware.cors import CORSMiddleware
 
 from website_analyzer import analyze_website
 from cookie_analyzer import analyze_cookies
 from security_findings import generate_security_findings
 from risk_scorer import calculate_risk, calculate_finding_summary
+try:
+    from ml_service import load_ml_model, get_model_status, predict_url_phishing
+except ImportError:
+    from backend.ml_service import load_ml_model, get_model_status, predict_url_phishing
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan context manager.
+    Loads ML phishing model once at startup without blocking or failing on error.
+    """
+    load_ml_model()
+    yield
 
 
 app = FastAPI(
     title="Website Security API",
     description="Website security, cookie configuration, TLS analyzer, and risk scoring engine",
-    version="1.2.0"
+    version="1.2.0",
+    lifespan=lifespan
+)
+
+# Enable CORS specifically for Chrome Extension origins (Manifest V3)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
+
 class WebsiteRequest(BaseModel):
-    url: str = Field(..., description="The HTTP or HTTPS website URL to analyze")
+    url: str = Field(..., max_length=2048, description="The HTTP or HTTPS website URL to analyze")
 
 
 @app.exception_handler(Exception)
@@ -50,12 +79,17 @@ def health():
     }
 
 
+@app.get("/health/ml")
+def health_ml():
+    return get_model_status()
+
+
 @app.post("/analyze")
-def analyze_website_endpoint(website: WebsiteRequest):
+async def analyze_website_endpoint(website: WebsiteRequest):
     url = str(website.url).strip()
 
-    # Perform website connectivity, redirect, TLS, and header analysis
-    website_data = analyze_website(url)
+    # Perform website connectivity, redirect, TLS, and header analysis in threadpool
+    website_data = await asyncio.to_thread(analyze_website, url)
 
     # Handle connection errors or security blocks
     if not website_data.get("reachable", False):
@@ -101,8 +135,22 @@ def analyze_website_endpoint(website: WebsiteRequest):
             # Guarantee HTTP connection is closed on all execution paths
             response.close()
 
+    # Perform offline ML phishing inference safely and asynchronously
+    try:
+        ml_result = await predict_url_phishing(url)
+    except Exception as ml_err:
+        ml_result = {
+            "available": False,
+            "url": url,
+            "error": f"ML prediction failed: {ml_err}"
+        }
+
     # Generate structured security findings and assessment limitations
-    findings, limitations = generate_security_findings(website_data, cookie_data)
+    findings, limitations = generate_security_findings(
+        website_data,
+        cookie_data,
+        ml_result=ml_result
+    )
 
     # Calculate risk score and summary metrics
     assessment_context = {
@@ -113,7 +161,7 @@ def analyze_website_endpoint(website: WebsiteRequest):
     finding_summary = calculate_finding_summary(findings)
 
     # Return unified, machine-readable analysis response
-    return {
+    response_payload = {
         **website_data,
         "cookies": cookie_data,
         "assessment": assessment,
@@ -121,3 +169,9 @@ def analyze_website_endpoint(website: WebsiteRequest):
         "finding_summary": finding_summary,
         "limitations": limitations
     }
+
+    # Expose backward-compatible ML analysis metadata
+    if ml_result is not None:
+        response_payload["ml_analysis"] = ml_result
+
+    return response_payload

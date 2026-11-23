@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Website Security &amp; Cookie Analyzer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="brand-icon-wrapper" aria-hidden="true">
+          <img src="icons/icon48.png" alt="" class="brand-logo-img" width="24" height="24">
+        </div>
+        <div class="brand-text-group">
+          <h1 class="brand-title">SITE SECURITY</h1>
+          <span class="brand-subtitle">WEBSITE ANALYZER</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="backend-status-indicator" class="status-indicator status-offline" title="Backend Status">
+          <span class="status-dot"></span>
+          <span id="backend-status-text" class="status-label">CHECKING</span>
+        </span>
+        <button id="rescan-btn" class="icon-button" title="Rescan current tab" aria-label="Rescan current website">
+          <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main id="main-content" class="main-content">
+      <!-- Target Website Identity Card -->
+      <section class="target-card" aria-label="Target website identity">
+        <div class="target-top-row">
+          <span id="protocol-badge" class="protocol-badge protocol-unknown">...</span>
+          <span id="target-hostname" class="target-hostname" title="Hostname">Detecting website...</span>
+        </div>
+        <div id="target-url-preview" class="target-url-preview" title="Target URL">Detecting active tab URL...</div>
+        <div id="redirect-notice" class="redirect-notice hidden"></div>
+      </section>
+
+      <!-- Loading State View -->
+      <section id="loading-state" class="state-container hidden" aria-live="polite">
+        <div class="spinner-ring"></div>
+        <h2 class="state-title">ANALYZING SECURITY</h2>
+        <p id="loading-status-text" class="state-description">Connecting to local analyzer at 127.0.0.1:8000...</p>
+      </section>
+
+      <!-- Error / Notice State View -->
+      <section id="error-state" class="state-container hidden" aria-live="assertive">
+        <div id="error-icon" class="state-icon error-icon-bg">
+          <svg class="state-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+        </div>
+        <h2 id="error-title" class="state-title">BACKEND UNAVAILABLE</h2>
+        <p id="error-message" class="state-description">Could not connect to the local analysis backend.</p>
+        <div id="error-remediation" class="error-remediation hidden"></div>
+        <button id="error-retry-btn" class="primary-button">RETRY CONNECTION</button>
+      </section>
+
+      <!-- Analysis Results Container -->
+      <div id="results-container" class="results-container hidden">
+        <!-- Critical Finding Callout Banner -->
+        <div id="critical-alert-banner" class="critical-alert hidden" role="alert">
+          <div class="alert-icon">!</div>
+          <div class="alert-content">
+            <strong class="alert-title">CRITICAL FINDING DETECTED</strong>
+            <p class="alert-text">One or more severe security issues require immediate attention.</p>
+          </div>
+        </div>
+
+        <!-- Partial Assessment Callout Banner -->
+        <div id="partial-alert-banner" class="partial-alert hidden" role="status">
+          <div class="alert-icon">&bull;</div>
+          <div class="alert-content">
+            <strong class="alert-title">PARTIAL ASSESSMENT</strong>
+            <p id="partial-alert-text" class="alert-text">Some security checks were limited or unavailable.</p>
+          </div>
+        </div>
+
+        <!-- Primary Assessment Card (Circular Score Focus) -->
+        <section class="assessment-card" aria-label="Risk assessment score">
+          <div class="score-display-row">
+            <div class="score-ring-wrapper">
+              <svg class="score-ring-svg" viewBox="0 0 100 100" width="96" height="96" role="img" aria-label="Risk Score Gauge">
+                <circle class="score-ring-track" cx="50" cy="50" r="42"></circle>
+                <circle id="score-ring-progress" class="score-ring-progress ring-unknown" cx="50" cy="50" r="42"></circle>
+              </svg>
+              <div class="score-center-value">
+                <span id="score-value" class="score-number">--</span>
+                <span id="score-scale" class="score-scale">RISK %</span>
+              </div>
+            </div>
+            <div class="score-meta-column">
+              <div class="score-meta-badges">
+                <span id="risk-level-badge" class="risk-badge risk-unknown">UNKNOWN RISK</span>
+                <span id="confidence-badge" class="confidence-badge confidence-unknown" title="Confidence in the assessment based on observable data">CONFIDENCE: --</span>
+              </div>
+              <div class="score-scale-legend" aria-hidden="true">
+                <span class="legend-step legend-low">0 LOW</span>
+                <span class="legend-step legend-mod">20 MOD</span>
+                <span class="legend-step legend-high">40 HIGH</span>
+                <span class="legend-step legend-crit">60+ CRIT</span>
+              </div>
+            </div>
+          </div>
+          <p id="assessment-summary-text" class="assessment-summary-text">Awaiting scan analysis...</p>
+        </section>
+
+        <!-- Findings Severity Matrix Overview -->
+        <section class="findings-overview" aria-label="Finding severity counts">
+          <div class="severity-chip chip-critical" title="Critical Findings">
+            <span class="chip-count" id="count-critical">0</span>
+            <span class="chip-label">CRIT</span>
+          </div>
+          <div class="severity-chip chip-high" title="High Findings">
+            <span class="chip-count" id="count-high">0</span>
+            <span class="chip-label">HIGH</span>
+          </div>
+          <div class="severity-chip chip-medium" title="Medium Findings">
+            <span class="chip-count" id="count-medium">0</span>
+            <span class="chip-label">MED</span>
+          </div>
+          <div class="severity-chip chip-low" title="Low Findings">
+            <span class="chip-count" id="count-low">0</span>
+            <span class="chip-label">LOW</span>
+          </div>
+          <div class="severity-chip chip-info" title="Informational Findings">
+            <span class="chip-count" id="count-info">0</span>
+            <span class="chip-label">INFO</span>
+          </div>
+        </section>
+
+        <!-- Structured Findings Section -->
+        <section class="findings-section" aria-label="Security findings section">
+          <div class="section-header">
+            <button type="button" id="findings-toggle-btn" class="findings-section-toggle" aria-expanded="true" aria-controls="findings-collapsible-wrapper">
+              <span id="findings-section-chevron" class="section-chevron" aria-hidden="true">&#x25BC;</span>
+              <span class="section-title">FINDINGS (<span id="findings-total-count">0</span>)</span>
+            </button>
+          </div>
+          <div id="findings-collapsible-wrapper" class="findings-collapsible-wrapper">
+            <div id="findings-empty" class="findings-empty hidden">
+              <p>No active security configuration issues were observed by the completed checks.</p>
+            </div>
+            <div id="findings-list" class="findings-list">
+              <!-- Dynamically populated finding cards -->
+            </div>
+          </div>
+        </section>
+
+        <!-- Technical Website Details Accordion -->
+        <section class="details-section">
+          <details class="accordion-card" id="tech-details-accordion">
+            <summary class="accordion-summary">
+              <span class="summary-title">TECHNICAL INSPECTION</span>
+              <span class="summary-chevron" aria-hidden="true">&#x25BC;</span>
+            </summary>
+            <div class="accordion-content">
+              <!-- Sub-section: TLS Certificate -->
+              <div class="tech-group">
+                <h3 class="tech-group-title">TLS Certificate</h3>
+                <div id="tls-details-grid" class="tech-grid">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+
+              <!-- Sub-section: Security Headers -->
+              <div class="tech-group">
+                <h3 class="tech-group-title">HTTP Security Headers</h3>
+                <div id="headers-details-list" class="tech-checklist">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+
+              <!-- Sub-section: Cookie Security -->
+              <div class="tech-group">
+                <h3 class="tech-group-title">Cookie Configurations</h3>
+                <div id="cookies-summary-stats" class="stats-row">
+                  <!-- Populated dynamically -->
+                </div>
+                <div id="cookies-details-list" class="cookies-table-container">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+
+              <!-- Sub-section: Network & Redirects -->
+              <div class="tech-group">
+                <h3 class="tech-group-title">Network &amp; Redirects</h3>
+                <div id="network-details-grid" class="tech-grid">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <!-- Methodology & Limitations Accordion -->
+        <section class="methodology-section">
+          <details class="accordion-card" id="methodology-accordion">
+            <summary class="accordion-summary">
+              <span class="summary-title">METHODOLOGY &amp; LIMITATIONS</span>
+              <span class="summary-chevron" aria-hidden="true">&#x25BC;</span>
+            </summary>
+            <div class="accordion-content">
+              <p class="methodology-note">
+                <strong>Heuristic Risk Assessment (v<span id="methodology-version">1.0</span>)</strong>:
+                The risk score is a deterministic heuristic between 0 and 100 based on observable HTTP security headers,
+                TLS certificate attributes, and cookie flags. A Low score does not guarantee that a website is free of
+                vulnerabilities or malicious content.
+              </p>
+              <div id="limitations-container" class="limitations-list-container">
+                <!-- Limitations list dynamically injected -->
+              </div>
+            </div>
+          </details>
+        </section>
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <div class="footer-privacy">
+        <svg class="footer-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <span>Scans are analyzed locally by your engine at 127.0.0.1:8000. No cookies or history are stored.</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

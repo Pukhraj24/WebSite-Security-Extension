@@ -14,6 +14,8 @@ Design Rules:
 """
 
 from typing import Dict, Any, List, Optional, Tuple
+from urllib.parse import urlparse
+import ipaddress
 import re
 
 
@@ -34,7 +36,10 @@ CATEGORY_TLS = "tls_certificate"
 CATEGORY_HEADERS = "security_headers"
 CATEGORY_COOKIES = "cookie_security"
 CATEGORY_REDIRECTS = "redirects"
+CATEGORY_DOMAIN = "domain_identity"
+CATEGORY_CONTENT = "page_content"
 CATEGORY_LIMITATIONS = "assessment_limitations"
+CATEGORY_PHISHING = "phishing_heuristic"
 
 # Confidence levels
 CONFIDENCE_HIGH = "high"
@@ -178,6 +183,75 @@ def evaluate_transport_security(website_data: Dict[str, Any]) -> List[Dict[str, 
     return findings
 
 
+def evaluate_domain_identity(website_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Evaluate domain and hostname characteristics (Punycode/IDN, IP-literal host)."""
+    findings = []
+    hostname = website_data.get("hostname") or ""
+    if not hostname and website_data.get("final_url"):
+        hostname = urlparse(website_data.get("final_url")).hostname or ""
+    if not hostname and website_data.get("url"):
+        hostname = urlparse(website_data.get("url")).hostname or ""
+
+    if not hostname:
+        return findings
+
+    hostname_lower = hostname.lower()
+
+    # 1. Raw IP address host (e.g. http://93.184.215.14/ or https://[::1]/)
+    try:
+        clean_host = hostname_lower.strip("[]")
+        ip_obj = ipaddress.ip_address(clean_host)
+        findings.append(create_finding(
+            finding_id="url_ip_address_host",
+            title="Raw IP Address Used As Hostname",
+            category=CATEGORY_DOMAIN,
+            severity=SEVERITY_MEDIUM,
+            confidence=CONFIDENCE_HIGH,
+            summary="The website URL uses a raw IP address directly instead of a registered domain name.",
+            evidence={
+                "hostname": hostname,
+                "ip_version": f"IPv{ip_obj.version}"
+            },
+            impact="Legitimate public websites almost universally use registered domain names. Raw IP destinations are frequently associated with temporary attack servers, phishing infrastructure, or unauthenticated services.",
+            recommendation="Access web services via authenticated domain names with corresponding TLS certificates.",
+            affected_component="URL Hostname",
+            references=["https://www.cisa.gov/news-events/alerts/2020/09/29/technical-approaches-uncovering-and-remediating-malicious-activity"]
+        ))
+    except ValueError:
+        pass
+
+    # 2. Punycode / Internationalized Domain Name (IDN) homograph check
+    labels = hostname_lower.split(".")
+    punycode_labels = [l for l in labels if l.startswith("xn--")]
+    if punycode_labels:
+        decoded_domain = hostname
+        try:
+            decoded_domain = hostname.encode("ascii").decode("idna")
+        except Exception:
+            pass
+
+        findings.append(create_finding(
+            finding_id="domain_punycode_homograph",
+            title="Punycode / Internationalized Domain Name Detected",
+            category=CATEGORY_DOMAIN,
+            severity=SEVERITY_MEDIUM,
+            confidence=CONFIDENCE_HIGH,
+            summary="The domain name uses Punycode encoding (xn--), which can be used to visually spoof legitimate brand domains (homograph attack).",
+            evidence={
+                "hostname": hostname,
+                "punycode_labels": punycode_labels,
+                "decoded_domain": decoded_domain
+            },
+            impact="Attackers use lookalike characters from international character sets to deceive users into mistaking the domain for a trusted brand.",
+            recommendation="Verify that the decoded domain corresponds to the authentic, intended service before entering sensitive information.",
+            affected_component="Domain Name",
+            references=["https://owasp.org/www-community/attacks/IDN_Homograph_Attack"],
+            limitations=["Legitimate international websites also use Punycode; this finding indicates spoofing potential rather than confirmed malicious intent."]
+        ))
+
+    return findings
+
+
 def evaluate_tls_certificate(website_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Evaluate TLS certificate validity, expiration, trust, and connection details."""
     findings = []
@@ -266,6 +340,26 @@ def evaluate_tls_certificate(website_data: Dict[str, Any]) -> List[Dict[str, Any
             affected_component="TLS Certificate"
         ))
 
+    # Deprecated TLS protocol version (TLS 1.0, 1.1, SSLv3)
+    tls_version = str(tls_cert.get("tls_version") or "").strip()
+    if tls_version in {"SSLv2", "SSLv3", "TLSv1", "TLSv1.0", "TLSv1.1"}:
+        findings.append(create_finding(
+            finding_id="tls_deprecated_version",
+            title="Deprecated TLS Protocol Version In Use",
+            category=CATEGORY_TLS,
+            severity=SEVERITY_HIGH,
+            confidence=CONFIDENCE_HIGH,
+            summary=f"The connection negotiated deprecated protocol version {tls_version}.",
+            evidence={
+                "tls_version": tls_version,
+                "cipher": tls_cert.get("cipher")
+            },
+            impact="Deprecated TLS versions (TLS 1.0, 1.1, and SSLv3) have known cryptographic weaknesses (e.g. POODLE, BEAST) and are rejected by modern secure clients.",
+            recommendation="Configure the web server to disable SSLv3, TLS 1.0, and TLS 1.1, enforcing TLS 1.2 or TLS 1.3.",
+            affected_component="TLS Protocol Configuration",
+            references=["https://datatracker.ietf.org/doc/html/rfc8996"]
+        ))
+
     return findings
 
 
@@ -331,6 +425,47 @@ def evaluate_security_headers(website_data: Dict[str, Any]) -> List[Dict[str, An
             affected_component="HTTP Response Headers",
             references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"]
         ))
+    else:
+        # Check for permissive or insecure script directives
+        csp_lower = csp_value.lower()
+        raw_directives = [d.strip() for d in csp_lower.split(";") if d.strip()]
+        directive_map = {}
+        for d in raw_directives:
+            parts = d.split()
+            if parts:
+                directive_map[parts[0]] = parts[1:]
+
+        insecure_tokens = []
+        target_script_sources = []
+        if "script-src" in directive_map:
+            target_script_sources.extend(directive_map["script-src"])
+        elif "script-src-elem" in directive_map:
+            target_script_sources.extend(directive_map["script-src-elem"])
+        elif "default-src" in directive_map:
+            target_script_sources.extend(directive_map["default-src"])
+
+        if "'unsafe-inline'" in target_script_sources:
+            insecure_tokens.append("'unsafe-inline'")
+        if "'unsafe-eval'" in target_script_sources:
+            insecure_tokens.append("'unsafe-eval'")
+
+        if insecure_tokens:
+            findings.append(create_finding(
+                finding_id="header_insecure_csp",
+                title="Content Security Policy Contains Insecure Directives",
+                category=CATEGORY_HEADERS,
+                severity=SEVERITY_LOW,
+                confidence=CONFIDENCE_HIGH,
+                summary=f"Content-Security-Policy allows unsafe script execution via {', '.join(insecure_tokens)}.",
+                evidence={
+                    "insecure_directives": insecure_tokens,
+                    "csp_snippet": csp_value[:150]
+                },
+                impact="Using 'unsafe-inline' or 'unsafe-eval' significantly weakens CSP defenses against Cross-Site Scripting (XSS) by allowing arbitrary inline script execution or string-to-code evaluation.",
+                recommendation="Remove 'unsafe-inline' and 'unsafe-eval' from script directives; use cryptographically random nonces or cryptographic hashes instead.",
+                affected_component="HTTP Response Headers",
+                references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/script-src"]
+            ))
 
     # 3. Framing Protections (X-Frame-Options vs CSP frame-ancestors overlap)
     xfo = headers.get("x_frame_options", {})
@@ -588,13 +723,166 @@ def evaluate_cookie_security(cookie_data: Dict[str, Any]) -> List[Dict[str, Any]
     return findings
 
 
+def evaluate_page_content(website_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Evaluate static HTML content signals (forms, credential actions)."""
+    findings = []
+    page_content = website_data.get("page_content")
+    if not page_content:
+        return findings
+
+    insecure_forms = page_content.get("insecure_forms", [])
+    if insecure_forms:
+        has_password = any(f.get("has_password", False) for f in insecure_forms)
+        severity = SEVERITY_CRITICAL if has_password else SEVERITY_HIGH
+        findings.append(create_finding(
+            finding_id="form_insecure_submission",
+            title="Insecure Plaintext Form Submission Detected",
+            category=CATEGORY_CONTENT,
+            severity=severity,
+            confidence=CONFIDENCE_HIGH,
+            summary=f"{len(insecure_forms)} HTML form(s) submit data over unencrypted HTTP" + (" including password input(s)." if has_password else "."),
+            evidence={
+                "insecure_form_count": len(insecure_forms),
+                "target_actions": [f.get("action") for f in insecure_forms][:5],
+                "contains_password_input": has_password
+            },
+            impact="Form data transmitted over unencrypted HTTP can be intercepted, read, or modified by intermediate network eavesdroppers.",
+            recommendation="Ensure all HTML form 'action' attributes use secure HTTPS URLs.",
+            affected_component="HTML Form",
+            references=["https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"]
+        ))
+
+    cross_domain_password_forms = page_content.get("cross_domain_password_forms", [])
+    if cross_domain_password_forms:
+        target_hosts = list({f.get("target_host") for f in cross_domain_password_forms if f.get("target_host")})
+        findings.append(create_finding(
+            finding_id="form_external_credential_destination",
+            title="Password Form Submits to Unrelated External Domain",
+            category=CATEGORY_CONTENT,
+            severity=SEVERITY_HIGH,
+            confidence=CONFIDENCE_HIGH,
+            summary=f"A password form submits credentials to a third-party domain ({', '.join(target_hosts[:3])}) rather than the website's own origin.",
+            evidence={
+                "target_actions": [f.get("action") for f in cross_domain_password_forms][:5],
+                "target_hosts": target_hosts[:5],
+                "base_host": cross_domain_password_forms[0].get("base_host")
+            },
+            impact="Submitting login credentials to an external or unrelated origin is a hallmark of credential harvesting and phishing pages.",
+            recommendation="Verify that credential forms submit strictly to your authenticated origin or a recognized identity provider.",
+            affected_component="HTML Form",
+            references=["https://owasp.org/www-community/attacks/Phishing"]
+        ))
+
+    return findings
+
+
+def evaluate_ml_phishing(ml_result: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Evaluate offline ML phishing heuristic prediction for security findings.
+
+    Threshold Policy:
+      - prob >= 0.95: Critical severity finding ('ml_phishing_heuristic')
+      - 0.85 <= prob < 0.95: High severity finding ('ml_phishing_heuristic')
+      - prob < 0.85 or unavailable: No finding generated
+    """
+    if not ml_result or not isinstance(ml_result, dict):
+        return []
+
+    if not ml_result.get("available", False):
+        return []
+
+    prob = ml_result.get("phishing_probability")
+    if prob is None or not isinstance(prob, (int, float)):
+        return []
+
+    prob = float(prob)
+    url_str = str(ml_result.get("url", ""))
+
+    if prob >= 0.95:
+        return [
+            create_finding(
+                finding_id="ml_phishing_heuristic",
+                title="Critical Machine Learning Phishing Heuristic",
+                category=CATEGORY_PHISHING,
+                severity=SEVERITY_CRITICAL,
+                confidence=CONFIDENCE_HIGH,
+                summary=(
+                    f"Offline machine learning classifier identified this URL as highly deceptive with a "
+                    f"{prob * 100:.1f}% phishing probability (threshold >= 95.0%)."
+                ),
+                evidence={
+                    "phishing_probability": round(prob, 4),
+                    "classification": "phishing",
+                    "heuristic_severity": "critical",
+                    "threshold_applied": 0.95,
+                    "model_name": ml_result.get("model_name", "HistGradientBoosting"),
+                    "model_version": ml_result.get("model_version", "v2.0.0"),
+                    "features_analyzed": ml_result.get("feature_count", 40),
+                    "url_preview": url_str[:128]
+                },
+                impact=(
+                    "Users navigating this URL face extreme risk of credential theft, session hijacking, "
+                    "or financial fraud through deceptive domain or path characteristics."
+                ),
+                recommendation=(
+                    "Do not enter passwords, personal data, or banking credentials on this page. "
+                    "Verify the organization's authentic domain name before continuing."
+                ),
+                affected_component="URL Lexical & Domain Structure",
+                references=[
+                    "https://csrc.nist.gov/glossary/term/phishing",
+                    "https://owasp.org/www-community/attacks/Phishing"
+                ]
+            )
+        ]
+    elif prob >= 0.85:
+        return [
+            create_finding(
+                finding_id="ml_phishing_heuristic",
+                title="High-Risk Machine Learning Phishing Heuristic",
+                category=CATEGORY_PHISHING,
+                severity=SEVERITY_HIGH,
+                confidence=CONFIDENCE_HIGH,
+                summary=(
+                    f"Offline machine learning classifier identified suspicious lexical patterns characteristic "
+                    f"of phishing with a {prob * 100:.1f}% probability (threshold >= 85.0%)."
+                ),
+                evidence={
+                    "phishing_probability": round(prob, 4),
+                    "classification": "phishing",
+                    "heuristic_severity": "high",
+                    "threshold_applied": 0.85,
+                    "model_name": ml_result.get("model_name", "HistGradientBoosting"),
+                    "model_version": ml_result.get("model_version", "v2.0.0"),
+                    "features_analyzed": ml_result.get("feature_count", 40),
+                    "url_preview": url_str[:128]
+                },
+                impact=(
+                    "The URL structure contains entropy, token length, or brand-spoofing characteristics "
+                    "consistently associated with phishing campaigns."
+                ),
+                recommendation=(
+                    "Exercise high caution. Confirm the authenticity of this web address through a known "
+                    "independent channel before interacting with sensitive services."
+                ),
+                affected_component="URL Lexical & Domain Structure",
+                references=[
+                    "https://csrc.nist.gov/glossary/term/phishing"
+                ]
+            )
+        ]
+
+    return []
+
+
 # ==============================================================================
 # Public Findings Aggregator
 # ==============================================================================
 
 def generate_security_findings(
     website_data: Dict[str, Any],
-    cookie_data: Optional[Dict[str, Any]] = None
+    cookie_data: Optional[Dict[str, Any]] = None,
+    ml_result: Optional[Dict[str, Any]] = None
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Generate normalized security findings and assessment limitations.
@@ -630,11 +918,42 @@ def generate_security_findings(
         findings.extend(evaluate_tls_certificate(website_data))
 
     # Evaluate Security Headers
-    findings.extend(evaluate_security_headers(website_data))
+    if website_data.get("connection_warning") and not website_data.get("security_headers"):
+        limitations.append({
+            "code": "HTTP_HEADERS_UNAVAILABLE",
+            "message": "HTTP response headers were unavailable due to TLS connection termination.",
+            "impact_on_assessment": "Header protections (CSP, HSTS, XFO) could not be verified."
+        })
+    else:
+        findings.extend(evaluate_security_headers(website_data))
 
     # Evaluate Cookies
-    if cookie_data:
+    if website_data.get("connection_warning") and (not cookie_data or cookie_data.get("cookie_count", 0) == 0):
+        limitations.append({
+            "code": "COOKIES_UNAVAILABLE",
+            "message": "Cookie configurations were unavailable due to TLS connection termination.",
+            "impact_on_assessment": "Cookie security flags could not be verified."
+        })
+    elif cookie_data:
         findings.extend(evaluate_cookie_security(cookie_data))
+
+    # Evaluate Domain Identity (Punycode / Raw IP)
+    findings.extend(evaluate_domain_identity(website_data))
+
+    # Evaluate Page Content (Insecure Forms & Credential Actions)
+    findings.extend(evaluate_page_content(website_data))
+
+    # Evaluate Machine Learning Phishing Heuristics
+    if ml_result is not None:
+        if ml_result.get("available", False):
+            findings.extend(evaluate_ml_phishing(ml_result))
+        elif ml_result.get("error"):
+            limitations.append({
+                "code": "ML_PHISHING_INSPECTION_UNAVAILABLE",
+                "message": f"Machine learning phishing inspection was unavailable: {ml_result.get('error')}",
+                "impact_on_assessment": "Phishing heuristic confidence could not be evaluated via ML."
+            })
+
 
     # Deduplicate findings by stable 'id'
     unique_findings = {}

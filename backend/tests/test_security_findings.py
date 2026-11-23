@@ -299,3 +299,198 @@ def test_deterministic_finding_order():
     rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
     ranked_values = [rank[s] for s in severities]
     assert ranked_values == sorted(ranked_values, reverse=True)
+
+
+# ==============================================================================
+# 5. Domain Identity & Hostname Tests (Phase 6 Rules)
+# ==============================================================================
+
+def test_url_ip_address_host_finding():
+    """Verify that raw IP address hostname generates url_ip_address_host (Medium)."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTP",
+        "url": "http://93.184.215.14/",
+        "final_url": "http://93.184.215.14/",
+        "hostname": "93.184.215.14",
+        "redirect_chain": [],
+        "security_headers": {},
+        "tls_certificate": None
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "url_ip_address_host" in f_ids
+
+    ip_finding = next(f for f in findings if f["id"] == "url_ip_address_host")
+    assert ip_finding["severity"] == SEVERITY_MEDIUM
+    assert ip_finding["category"] == "domain_identity"
+    assert ip_finding["evidence"]["ip_version"] == "IPv4"
+    assert ip_finding["evidence"]["hostname"] == "93.184.215.14"
+
+
+def test_domain_punycode_homograph_finding():
+    """Verify that Punycode domain generates domain_punycode_homograph (Medium)."""
+    # xn--pple-43d.com is Punycode for арple.com (Cyrillic 'а')
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://xn--pple-43d.com/",
+        "final_url": "https://xn--pple-43d.com/",
+        "hostname": "xn--pple-43d.com",
+        "redirect_chain": [],
+        "security_headers": {},
+        "tls_certificate": {"checked": True, "valid": True, "trusted": True, "days_remaining": 60}
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "domain_punycode_homograph" in f_ids
+
+    puny_finding = next(f for f in findings if f["id"] == "domain_punycode_homograph")
+    assert puny_finding["severity"] == SEVERITY_MEDIUM
+    assert puny_finding["category"] == "domain_identity"
+    assert "xn--pple-43d" in puny_finding["evidence"]["punycode_labels"]
+    assert "decoded_domain" in puny_finding["evidence"]
+
+
+# ==============================================================================
+# 6. Deprecated TLS & Insecure CSP Tests (Phase 6 Rules)
+# ==============================================================================
+
+@pytest.mark.parametrize("deprecated_proto", ["TLSv1", "TLSv1.0", "TLSv1.1", "SSLv3"])
+def test_tls_deprecated_version_finding(deprecated_proto):
+    """Verify that obsolete TLS/SSL versions generate tls_deprecated_version (High)."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://legacy.example.com",
+        "final_url": "https://legacy.example.com/",
+        "redirect_chain": [],
+        "security_headers": {},
+        "tls_certificate": {
+            "checked": True,
+            "valid": True,
+            "trusted": True,
+            "days_remaining": 90,
+            "tls_version": deprecated_proto,
+            "cipher": "DES-CBC3-SHA"
+        }
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "tls_deprecated_version" in f_ids
+
+    deprecated_f = next(f for f in findings if f["id"] == "tls_deprecated_version")
+    assert deprecated_f["severity"] == SEVERITY_HIGH
+    assert deprecated_f["evidence"]["tls_version"] == deprecated_proto
+
+
+def test_header_insecure_csp_unsafe_inline():
+    """Verify that CSP with 'unsafe-inline' generates header_insecure_csp (Low)."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://example.com",
+        "final_url": "https://example.com/",
+        "redirect_chain": [],
+        "security_headers": {
+            "csp": {
+                "present": True,
+                "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https:;"
+            }
+        },
+        "tls_certificate": {"checked": True, "valid": True, "trusted": True, "days_remaining": 60}
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "header_insecure_csp" in f_ids
+    assert "header_missing_csp" not in f_ids
+
+    csp_f = next(f for f in findings if f["id"] == "header_insecure_csp")
+    assert csp_f["severity"] == SEVERITY_LOW
+    assert "'unsafe-inline'" in csp_f["evidence"]["insecure_directives"]
+
+
+def test_header_secure_csp_no_insecure_finding():
+    """Verify that strict CSP without unsafe directives produces no CSP findings."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://example.com",
+        "final_url": "https://example.com/",
+        "redirect_chain": [],
+        "security_headers": {
+            "csp": {
+                "present": True,
+                "value": "default-src 'none'; script-src 'self' 'nonce-rAnd0m'; object-src 'none';"
+            }
+        },
+        "tls_certificate": {"checked": True, "valid": True, "trusted": True, "days_remaining": 60}
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "header_insecure_csp" not in f_ids
+    assert "header_missing_csp" not in f_ids
+
+
+# ==============================================================================
+# 7. Page Content Form & Credential Security Tests (Phase 6 Rules)
+# ==============================================================================
+
+def test_form_insecure_submission_finding():
+    """Verify that forms posting to unencrypted HTTP trigger form_insecure_submission."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://example.com",
+        "final_url": "https://example.com/",
+        "redirect_chain": [],
+        "security_headers": {},
+        "tls_certificate": {"checked": True, "valid": True, "trusted": True, "days_remaining": 60},
+        "page_content": {
+            "total_forms": 1,
+            "insecure_forms": [
+                {"action": "http://example.com/login", "method": "POST", "has_password": True}
+            ],
+            "cross_domain_password_forms": []
+        }
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "form_insecure_submission" in f_ids
+
+    form_f = next(f for f in findings if f["id"] == "form_insecure_submission")
+    assert form_f["severity"] == SEVERITY_CRITICAL  # Critical because password input is transmitted over HTTP
+    assert form_f["evidence"]["contains_password_input"] is True
+    assert form_f["evidence"]["insecure_form_count"] == 1
+
+
+def test_form_external_credential_destination_finding():
+    """Verify that password forms submitting to unrelated external domain are flagged."""
+    data = {
+        "reachable": True,
+        "protocol": "HTTPS",
+        "url": "https://bank.example.com/login",
+        "final_url": "https://bank.example.com/login",
+        "redirect_chain": [],
+        "security_headers": {},
+        "tls_certificate": {"checked": True, "valid": True, "trusted": True, "days_remaining": 60},
+        "page_content": {
+            "total_forms": 1,
+            "insecure_forms": [],
+            "cross_domain_password_forms": [
+                {
+                    "action": "https://credential-harvester.com/collect",
+                    "target_host": "credential-harvester.com",
+                    "base_host": "bank.example.com"
+                }
+            ]
+        }
+    }
+    findings, _ = generate_security_findings(data)
+    f_ids = [f["id"] for f in findings]
+    assert "form_external_credential_destination" in f_ids
+
+    cross_f = next(f for f in findings if f["id"] == "form_external_credential_destination")
+    assert cross_f["severity"] == SEVERITY_HIGH
+    assert cross_f["category"] == "page_content"
+    assert "credential-harvester.com" in cross_f["evidence"]["target_hosts"]

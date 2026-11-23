@@ -24,3 +24,10 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Machine Learning artifacts & datasets
+ml/data/raw/
+ml/data/processed/
+ml/models/**/*.joblib
+ml/models/**/*.pkl
+!ml/models/experiments/best_model_v2.joblib

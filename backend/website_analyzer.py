@@ -1,18 +1,29 @@
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
+from html.parser import HTMLParser
 import requests
 import ssl
 import socket
 import os
 import tempfile
+import ipaddress
+import tldextract
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
-from ssrf_validator import (
-    safe_fetch,
-    create_safe_socket,
-    SSRFSecurityError,
-    validate_url
-)
+try:
+    from ssrf_validator import (
+        safe_fetch,
+        create_safe_socket,
+        SSRFSecurityError,
+        validate_url
+    )
+except ImportError:
+    from backend.ssrf_validator import (
+        safe_fetch,
+        create_safe_socket,
+        SSRFSecurityError,
+        validate_url
+    )
 
 
 # Security headers to inspect on the target website
@@ -27,6 +38,167 @@ SECURITY_HEADERS = {
     "cross_origin_resource_policy": "Cross-Origin-Resource-Policy",
     "cross_origin_embedder_policy": "Cross-Origin-Embedder-Policy"
 }
+
+
+class SecurityHTMLParser(HTMLParser):
+    """
+    Lightweight, streaming HTML parser to extract security signals from forms
+    and input elements without external dependencies.
+    """
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+        self.in_form = False
+        self.current_form: Optional[Dict[str, Any]] = None
+        self.forms: List[Dict[str, Any]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = {k.lower(): (v or "") for k, v in attrs}
+        tag_lower = tag.lower()
+
+        if tag_lower == "form":
+            self.in_form = True
+            action = attrs_dict.get("action", "").strip()
+            resolved_action = urljoin(self.base_url, action) if action else self.base_url
+            method = attrs_dict.get("method", "GET").upper()
+            self.current_form = {
+                "action": action,
+                "resolved_action": resolved_action,
+                "method": method,
+                "has_password": False
+            }
+        elif tag_lower == "input":
+            input_type = attrs_dict.get("type", "text").lower()
+            if input_type == "password":
+                if self.in_form and self.current_form is not None:
+                    self.current_form["has_password"] = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "form" and self.in_form:
+            self.in_form = False
+            if self.current_form:
+                self.forms.append(self.current_form)
+                self.current_form = None
+
+    def close(self):
+        super().close()
+        if self.in_form and self.current_form:
+            self.forms.append(self.current_form)
+            self.in_form = False
+            self.current_form = None
+
+
+# Offline TLD extractor using bundled Public Suffix List snapshot.
+# suffix_list_urls=() guarantees zero network calls or download attempts.
+_OFFLINE_TLD_EXTRACTOR = tldextract.TLDExtract(
+    suffix_list_urls=(),
+    include_psl_private_domains=True
+)
+
+
+def get_registrable_domain(hostname: Optional[str]) -> Optional[str]:
+    """
+    Safely extract the registrable domain (eTLD+1) for a hostname using an offline
+    Public Suffix List extractor.
+
+    Correctly handles:
+    - Standard domains (example.com -> example.com)
+    - Multipart public suffixes (bank.co.uk -> bank.co.uk, phish.co.uk -> phish.co.uk)
+    - Second-level country domains (example.com.au, example.gov.uk)
+    - Private domains (user.github.io -> user.github.io)
+    - Subdomains (auth.example.com -> example.com, login.bank.co.uk -> bank.co.uk)
+    - IP addresses and localhost without throwing exceptions
+    - Malformed hosts, case normalization, and trailing dots
+    - Never makes network calls (offline PSL snapshot only)
+    """
+    if not hostname:
+        return None
+
+    clean_host = hostname.strip().rstrip(".").lower()
+    if not clean_host:
+        return None
+
+    # Check for IPv4 or IPv6 literals
+    raw_ip = clean_host[1:-1] if clean_host.startswith("[") and clean_host.endswith("]") else clean_host
+    try:
+        ip = ipaddress.ip_address(raw_ip)
+        return str(ip)
+    except ValueError:
+        pass
+
+    try:
+        extracted = _OFFLINE_TLD_EXTRACTOR(clean_host)
+        if extracted.domain and extracted.suffix:
+            return f"{extracted.domain}.{extracted.suffix}"
+        if extracted.domain:
+            return extracted.domain
+        if extracted.suffix:
+            return extracted.suffix
+    except Exception:
+        pass
+
+    return clean_host
+
+
+def extract_page_content_security(html_text: str, base_url: str) -> Dict[str, Any]:
+    """
+    Safely extract static HTML security signals (e.g. form destinations, password inputs)
+    without running a browser engine or executing scripts.
+    """
+    if not html_text:
+        return {
+            "total_forms": 0,
+            "insecure_forms": [],
+            "cross_domain_password_forms": []
+        }
+
+    parser = SecurityHTMLParser(base_url)
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:
+        pass
+
+    base_parsed = urlparse(base_url)
+    base_host = (base_parsed.hostname or "").lower()
+    base_root = get_registrable_domain(base_host)
+
+    insecure_forms = []
+    cross_domain_password_forms = []
+
+    for f in parser.forms:
+        resolved = f.get("resolved_action", "")
+        resolved_lower = resolved.lower()
+        has_pwd = f.get("has_password", False)
+
+        # Insecure form: submits over unencrypted HTTP
+        if resolved_lower.startswith("http://"):
+            insecure_forms.append({
+                "action": resolved,
+                "method": f.get("method", "GET"),
+                "has_password": has_pwd
+            })
+
+        # Cross-domain password submission: password form submitting to an unrelated domain
+        if has_pwd and resolved_lower.startswith(("http://", "https://")):
+            target_host = (urlparse(resolved).hostname or "").lower()
+            if target_host and base_host and target_host != base_host:
+                target_root = get_registrable_domain(target_host)
+
+                # Flag as cross-domain if root domains differ, or if either could not be extracted safely
+                if not base_root or not target_root or base_root != target_root:
+                    form_entry = {
+                        "action": resolved,
+                        "target_host": target_host,
+                        "base_host": base_host,
+                    }
+                    cross_domain_password_forms.append(form_entry)
+
+    return {
+        "total_forms": len(parser.forms),
+        "insecure_forms": insecure_forms,
+        "cross_domain_password_forms": cross_domain_password_forms
+    }
 
 
 def parse_certificate_time(value: Optional[str]) -> Optional[datetime]:
@@ -107,7 +279,8 @@ def get_certificate_info(hostname: str, port: int) -> Dict[str, Any]:
 
         with sock:
             with context.wrap_socket(sock, server_hostname=hostname) as secure_sock:
-                cert = secure_sock.getpeercert()
+                raw_cert = secure_sock.getpeercert()
+                cert: Dict[str, Any] = raw_cert if isinstance(raw_cert, dict) else {}
 
                 not_before = parse_certificate_time(cert.get("notBefore"))
                 not_after = parse_certificate_time(cert.get("notAfter"))
@@ -251,10 +424,32 @@ def analyze_website(url: str) -> Dict[str, Any]:
             }
         }
     except requests.exceptions.SSLError:
-        # TLS handshake or certificate failed during HTTP fetch
+        # TLS handshake or certificate failed during HTTP fetch.
+        # Run diagnostic inspection to determine the exact certificate issue.
         cert_info = None
         if secure_connection:
             cert_info = get_certificate_info(hostname, port)
+            if cert_info and cert_info.get("checked"):
+                # Target host is reachable; certificate trust failed.
+                # Return reachable=True partial analysis so findings and risk score are produced.
+                return {
+                    "url": url,
+                    "reachable": True,
+                    "domain": domain,
+                    "hostname": hostname,
+                    "protocol": protocol,
+                    "secure_connection": True,
+                    "status_code": None,
+                    "final_url": url,
+                    "redirect_count": 0,
+                    "redirect_chain": [],
+                    "response_time_ms": None,
+                    "content_type": None,
+                    "tls_certificate": cert_info,
+                    "security_headers": {},
+                    "response": None,
+                    "connection_warning": "TLS handshake failed; certificate was inspected diagnostically."
+                }
 
         return {
             "url": url,
@@ -265,6 +460,7 @@ def analyze_website(url: str) -> Dict[str, Any]:
             },
             "tls_certificate": cert_info
         }
+
     except requests.exceptions.RequestException:
         return {
             "url": url,
@@ -297,6 +493,14 @@ def analyze_website(url: str) -> Dict[str, Any]:
             "value": value
         }
 
+    # Extract page content security signals (forms, credential actions)
+    page_content = None
+    if content_type and any(t in content_type.lower() for t in ("text/html", "application/xhtml")):
+        try:
+            page_content = extract_page_content_security(response.text, final_url)
+        except Exception:
+            page_content = None
+
     # TLS certificate analysis (only if initial or final scheme is HTTPS)
     certificate_info = None
     final_is_https = final_url.lower().startswith("https://")
@@ -318,6 +522,7 @@ def analyze_website(url: str) -> Dict[str, Any]:
         "redirect_chain": redirect_chain,
         "response_time_ms": response_time_ms,
         "content_type": content_type,
+        "page_content": page_content,
         "tls_certificate": certificate_info,
         "security_headers": security_headers,
         # Response object passed for cookie analysis; must be closed by caller

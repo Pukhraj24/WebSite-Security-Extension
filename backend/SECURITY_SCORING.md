@@ -45,6 +45,9 @@ The **Risk Scoring Engine** and **Structured Security Findings System** evaluate
 - `security_headers`: Defensive HTTP response headers.
 - `cookie_security`: Cookie transmission, scope, and script access controls.
 - `redirects`: Redirection hops, downgrades, and loop protections.
+- `domain_identity`: Domain obfuscation, raw IP targets, and Punycode spoofing.
+- `page_content`: Form actions and credential transmission safety.
+- `phishing_heuristic`: Offline machine learning URL lexical phishing detection.
 - `assessment_limitations`: Observable constraints or incomplete scans.
 
 ### Severity-to-Weight Mapping:
@@ -80,6 +83,26 @@ The numerical score maps to four heuristic bands:
 | **60 – 100**| **Critical** | Urgent security flaws observed (e.g., untrusted TLS certificate or severe downgrades). |
 
 *Note on Unknown Assessment:* If a target is completely unreachable or blocked by safety policy, `risk_score` is `null` and `risk_level` is `"Unknown"`. Scores are never fabricated without evidence.
+
+---
+
+### 3.1 Hybrid Machine Learning Integration & Scoring Policy
+
+The system combines deterministic rule-based website inspection with an offline machine learning URL phishing classifier (`HistGradientBoostingClassifier`, 40 lexical features):
+
+1. **Threshold & Severity Policy**:
+   - **$P(\text{phishing}) \ge 0.95$**: Generates finding `ml_phishing_heuristic` at **Critical** severity (Base weight: `40`).
+   - **$0.85 \le P(\text{phishing}) < 0.95$**: Generates finding `ml_phishing_heuristic` at **High** severity (Base weight: `20`).
+   - **$P(\text{phishing}) < 0.85$**: No phishing finding generated; low/benign probabilities are recorded in metadata without modifying risk score.
+
+2. **Additive, Explainable Scoring**:
+   - The ML heuristic finding enters the unified finding list and contributes standard severity weight (+40 for Critical, +20 for High).
+   - The total score is computed via standard deduplication and clamped to $[0, 100]$.
+
+3. **Strict Non-Downgrade Guarantee**:
+   - Machine learning predictions **never override or downgrade** deterministic security findings.
+   - If a website possesses an invalid TLS certificate, unencrypted password action, or insecure cookies, these findings remain fully authoritative regardless of ML probability.
+   - If the ML model is unavailable or inference fails, deterministic analysis proceeds uninterrupted, and an assessment limitation (`ML_PHISHING_INSPECTION_UNAVAILABLE`) is noted.
 
 ---
 

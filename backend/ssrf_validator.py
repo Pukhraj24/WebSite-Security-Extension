@@ -401,6 +401,7 @@ class SSRFAdapter(HTTPAdapter):
 def create_ssrf_session() -> requests.Session:
     """Create a configured requests.Session with SSRF protection mounted."""
     session = requests.Session()
+    session.trust_env = False  # Isolate from environment proxies to prevent SSRF bypass
     adapter = SSRFAdapter()
     session.mount("http://", adapter)
     session.mount("https://", adapter)

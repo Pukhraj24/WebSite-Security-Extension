@@ -303,3 +303,13 @@ def test_request_timeout_handling():
         with patch("requests.Session.get", side_effect=requests.exceptions.Timeout("Read timed out")):
             with pytest.raises(RequestTimeoutError):
                 safe_fetch("https://example.com")
+
+
+def test_ssrf_session_ignores_environment_proxies():
+    """Verify that SSRF session ignores environment proxies to prevent bypass."""
+    import os
+    from ssrf_validator import create_ssrf_session
+
+    with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:8888", "HTTPS_PROXY": "http://127.0.0.1:8888"}):
+        session = create_ssrf_session()
+        assert session.trust_env is False

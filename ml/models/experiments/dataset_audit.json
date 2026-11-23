@@ -1,0 +1,183 @@
+{
+  "total_rows": 116600,
+  "legit_count": 100000,
+  "phish_count": 16600,
+  "imbalance_ratio": 6.02,
+  "exact_duplicate_urls": 1369,
+  "normalized_duplicate_urls": 1686,
+  "unique_domains": 90860,
+  "mixed_label_domains": 24,
+  "legit_long_path_count": 1292,
+  "legit_long_query_count": 111,
+  "legit_uuid_like_count": 39,
+  "legit_pct_encoded_count": 139,
+  "legit_multi_subdomain_count": 195,
+  "feature_distributions": {
+    "url_len": {
+      "legit_mean": 29.0761,
+      "phish_mean": 56.3047,
+      "legit_p95": 51.0,
+      "phish_p95": 175.0
+    },
+    "dom_len": {
+      "legit_mean": 13.0122,
+      "phish_mean": 11.8429,
+      "legit_p95": 23.0,
+      "phish_p95": 22.0
+    },
+    "is_ip": {
+      "legit_mean": 0.0001,
+      "phish_mean": 0.0004,
+      "legit_p95": 0.0,
+      "phish_p95": 0.0
+    },
+    "tld_len": {
+      "legit_mean": 3.3881,
+      "phish_mean": 2.9113,
+      "legit_p95": 6.0,
+      "phish_p95": 4.0
+    },
+    "subdom_cnt": {
+      "legit_mean": 0.8657,
+      "phish_mean": 0.7253,
+      "legit_p95": 1.0,
+      "phish_p95": 1.0
+    },
+    "letter_cnt": {
+      "legit_mean": 22.2598,
+      "phish_mean": 41.5551,
+      "legit_p95": 41.0,
+      "phish_p95": 135.0
+    },
+    "digit_cnt": {
+      "legit_mean": 0.1456,
+      "phish_mean": 5.7534,
+      "legit_p95": 0.0,
+      "phish_p95": 22.0
+    },
+    "special_cnt": {
+      "legit_mean": 6.6707,
+      "phish_mean": 8.9961,
+      "legit_p95": 10.0,
+      "phish_p95": 22.0
+    },
+    "eq_cnt": {
+      "legit_mean": 0.0271,
+      "phish_mean": 0.3954,
+      "legit_p95": 0.0,
+      "phish_p95": 3.0
+    },
+    "qm_cnt": {
+      "legit_mean": 0.02,
+      "phish_mean": 0.149,
+      "legit_p95": 0.0,
+      "phish_p95": 1.0
+    },
+    "amp_cnt": {
+      "legit_mean": 0.0079,
+      "phish_mean": 0.2395,
+      "legit_p95": 0.0,
+      "phish_p95": 2.0
+    },
+    "dot_cnt": {
+      "legit_mean": 2.1858,
+      "phish_mean": 1.9273,
+      "legit_p95": 3.0,
+      "phish_p95": 3.0
+    },
+    "dash_cnt": {
+      "legit_mean": 0.2428,
+      "phish_mean": 0.9374,
+      "legit_p95": 1.0,
+      "phish_p95": 3.0
+    },
+    "under_cnt": {
+      "legit_mean": 0.0262,
+      "phish_mean": 0.2199,
+      "legit_p95": 0.0,
+      "phish_p95": 1.0
+    },
+    "letter_ratio": {
+      "legit_mean": 0.7543,
+      "phish_mean": 0.7418,
+      "legit_p95": 0.8387,
+      "phish_p95": 0.8462
+    },
+    "digit_ratio": {
+      "legit_mean": 0.0031,
+      "phish_mean": 0.0738,
+      "legit_p95": 0.0,
+      "phish_p95": 0.3067
+    },
+    "spec_ratio": {
+      "legit_mean": 0.2427,
+      "phish_mean": 0.1844,
+      "legit_p95": 0.3182,
+      "phish_p95": 0.2609
+    },
+    "is_https": {
+      "legit_mean": 0.3509,
+      "phish_mean": 0.9143,
+      "legit_p95": 1.0,
+      "phish_p95": 1.0
+    },
+    "slash_cnt": {
+      "legit_mean": 3.1482,
+      "phish_mean": 3.6173,
+      "legit_p95": 5.0,
+      "phish_p95": 7.0
+    },
+    "entropy": {
+      "legit_mean": 3.7886,
+      "phish_mean": 4.3163,
+      "legit_p95": 4.2259,
+      "phish_p95": 5.5397
+    },
+    "path_len": {
+      "legit_mean": 4.6049,
+      "phish_mean": 17.1534,
+      "legit_p95": 23.0,
+      "phish_p95": 108.0
+    },
+    "query_len": {
+      "legit_mean": 0.3092,
+      "phish_mean": 9.3797,
+      "legit_p95": 0.0,
+      "phish_p95": 43.0
+    }
+  },
+  "tld_distribution_phishing": {
+    "com": 8080,
+    "dev": 1333,
+    "ly": 823,
+    "app": 438,
+    "me": 382,
+    "de": 380,
+    "io": 366,
+    "shop": 350,
+    "co": 345,
+    "cn": 320,
+    "icu": 253,
+    "cfd": 221,
+    "to": 215,
+    "cc": 193,
+    "top": 182
+  },
+  "tld_distribution_legit": {
+    "com": 25749,
+    "org": 17366,
+    "edu": 3860,
+    "de": 3398,
+    "cz": 2192,
+    "fr": 2163,
+    "ru": 1830,
+    "gov": 1685,
+    "ca": 1303,
+    "net": 1245,
+    "no": 1233,
+    "it": 1145,
+    "org.uk": 1134,
+    "ac.jp": 1105,
+    "co.uk": 1079
+  }
+}
